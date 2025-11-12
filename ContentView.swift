@@ -10,6 +10,7 @@ struct ContentView: View {
     @EnvironmentObject var apiService: APIService
     @EnvironmentObject var audioPlayer: AudioPlayerManager
     @EnvironmentObject var connectivity: ConnectivityService
+    @EnvironmentObject var offlineManager: OfflineManager
     @State private var selectedTab = 0
     
     var body: some View {
@@ -89,6 +90,11 @@ struct ContentView: View {
             if connectivity.isOffline {
                 OfflineBanner()
                     .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .onChange(of: connectivity.isOffline) { offline in
+            if !offline {
+                offlineManager.retryMissingArtwork()
             }
         }
     }

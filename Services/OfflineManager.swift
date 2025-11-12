@@ -191,7 +191,20 @@ final class OfflineManager: ObservableObject, @unchecked Sendable {
         return snapshot
     }
     
-    // MARK: - Download Management
+        func retryMissingArtwork() {
+        DispatchQueue.main.async {
+            let tracksNeedingArtwork = self.tracks.values.filter { track in
+                track.artworkURL == nil && !(track.song.albumArtURL?.isEmpty ?? true)
+            }
+            guard !tracksNeedingArtwork.isEmpty else { return }
+            for track in tracksNeedingArtwork {
+                self.ensureArtwork(for: track.song)
+            }
+        }
+    }
+
+
+// MARK: - Download Management
     func downloadPlaylist(playlist: Playlist, songs: [Song], apiService: APIService) {
         guard !songs.isEmpty else { return }
         if isPlaylistDownloading(playlist.id) { return }
