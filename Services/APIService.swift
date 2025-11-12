@@ -671,7 +671,7 @@ class APIService: ObservableObject {
         if let playlistId = playlistId {
             payload["playlistId"] = playlistId
         }
-        performDownloadAction(endpoint: "/api/download/spotify-playlist", payload: payload, completion: completion)
+        performDownloadAction(endpoint: "/api/spotify-playlist/import", payload: payload, completion: completion)
     }
     
     func cancelDownload(id: String, completion: @escaping (Result<Void, Error>) -> Void) {

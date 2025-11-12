@@ -137,7 +137,7 @@ Endpoints (grouped)
 	- DELETE /api/download/delete/:downloadId
 		- Removes download history entry (does not delete files in library)
 
-	- POST /api/download/spotify-playlist and /api/spotify-playlist/import
+	- POST /api/spotify-playlist/import (preferred endpoint)
 		- Body: { playlistUrl }
 		- Behavior: attempts to extract track list using spotdl; if extraction succeeds will schedule sequential downloads (1 per minute) to avoid rate limits.
 		- Response: often returns { success: true, playlistName, trackCount, sequentialMode: true, timeEstimate }
