@@ -8,6 +8,7 @@ import SwiftUI
 struct PlaylistDetailView: View {
     @EnvironmentObject var apiService: APIService
     @EnvironmentObject var audioPlayer: AudioPlayerManager
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var offlineManager: OfflineManager
     @EnvironmentObject var connectivity: ConnectivityService
     let playlist: Playlist
@@ -18,6 +19,8 @@ struct PlaylistDetailView: View {
     @State private var playlistDescription: String
     @State private var showingEditDetails = false
     @State private var showingReorder = false
+    @State private var showingDeleteConfirmation = false
+    @State private var isDeleting = false
     @State private var tempSongs: [Song] = []
     @State private var editStatus: String?
     @State private var usedOfflineDataset = false
@@ -173,6 +176,12 @@ struct PlaylistDetailView: View {
                         tempSongs = songs
                         showingReorder = true
                     }
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Text("Delete Playlist")
+                    }
+                    .disabled(isDeleting)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -186,6 +195,16 @@ struct PlaylistDetailView: View {
         }
         .sheet(isPresented: $showingReorder) {
             reorderSheet
+        }
+        .confirmationDialog("Delete Playlist?", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete Playlist", role: .destructive) {
+                deletePlaylist()
+            }
+            Button("Cancel", role: .cancel) {
+                showingDeleteConfirmation = false
+            }
+        } message: {
+            Text("This playlist will be removed from your library.")
         }
         .alert("Playlist", isPresented: Binding(get: { editStatus != nil }, set: { if !$0 { editStatus = nil } })) {
             Button("OK") { editStatus = nil }
@@ -327,6 +346,27 @@ struct PlaylistDetailView: View {
         }
     }
     
+    private func deletePlaylist() {
+        guard !isDeleting else { return }
+        isDeleting = true
+        showingDeleteConfirmation = false
+        apiService.deletePlaylist(playlistId: playlist.id) { result in
+            switch result {
+            case .success:
+                offlineManager.removePlaylist(playlist)
+                songs.removeAll()
+                editStatus = "Playlist deleted."
+                isDeleting = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    dismiss()
+                }
+            case .failure(let error):
+                editStatus = error.localizedDescription
+                isDeleting = false
+            }
+        }
+    }
+
     private func saveReorder() {
         let orders = tempSongs.enumerated().map { index, song in
             PlaylistReorderItem(musicId: song.id, position: index)

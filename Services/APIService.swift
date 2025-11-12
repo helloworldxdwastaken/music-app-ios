@@ -436,6 +436,15 @@ class APIService: ObservableObject {
         performBasicOperation(request: request, defaultMessage: "Playlist updated", completion: completion)
     }
     
+    func deletePlaylist(playlistId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)") else {
+            completion(.failure(APIError.invalidURL))
+            return
+        }
+        let request = createRequest(url: url, method: "DELETE")
+        performBasicOperation(request: request, defaultMessage: "Playlist deleted", completion: completion)
+    }
+
     func reorderPlaylist(playlistId: Int, orders: [PlaylistReorderItem], completion: @escaping (Result<Void, Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)/reorder") else {
             completion(.failure(APIError.invalidURL))
