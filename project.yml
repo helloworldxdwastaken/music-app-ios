@@ -4,7 +4,7 @@ name: MusicStream
 options:
   bundleIdPrefix: com.musicstream
   deploymentTarget:
-    iOS: 15.0
+    iOS: 18.0
   
 settings:
   base:
@@ -16,7 +16,7 @@ targets:
   MusicStream:
     type: application
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "18.0"
     sources:
       - path: .
         name: MusicStream
