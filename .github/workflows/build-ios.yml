@@ -35,32 +35,37 @@ jobs:
         run: |
           xcodegen generate
       
-      - name: Build Archive  
+      - name: Build with iOS 26 SDK
+        env:
+          DERIVED_DATA: build/DerivedData
         run: |
-          xcodebuild archive \
+          xcodebuild \
             -project MusicStream.xcodeproj \
             -scheme MusicStream \
-            -archivePath build/MusicStream.xcarchive \
-            -sdk iphoneos \
+            -configuration Release \
+            -sdk iphoneos26.0 \
             -destination "generic/platform=iOS" \
-            SKIP_INSTALL=NO \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS="arm64" \
-            EXCLUDED_ARCHS="arm64-simulator x86_64" \
-            VALID_ARCHS="arm64" \
-            SUPPORTED_PLATFORMS="iphoneos" \
-            ASSETCATALOG_COMPILER_INCLUDE_SIMULATOR_ASSETS=NO \
+            -derivedDataPath "$DERIVED_DATA" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            build
       
       - name: Package unsigned IPA
+        env:
+          DERIVED_DATA: build/DerivedData
         run: |
           set -euo pipefail
-          APP_PATH=$(find "build/MusicStream.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" | head -n 1)
+          BUILD_DIR="$DERIVED_DATA/Build/Products/Release-iphoneos"
+          if [[ ! -d "$BUILD_DIR" ]]; then
+            echo "Build directory not found: $BUILD_DIR"
+            ls -R "$DERIVED_DATA" || true
+            exit 1
+          fi
+          APP_PATH=$(find "$BUILD_DIR" -maxdepth 1 -name "*.app" | head -n 1)
           if [[ -z "$APP_PATH" ]]; then
-            echo "No .app found inside archive."
+            echo "No .app found inside build output. Contents:"
+            ls -R "$BUILD_DIR"
             exit 1
           fi
           APP_NAME=$(basename "$APP_PATH")
