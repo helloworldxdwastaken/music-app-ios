@@ -441,7 +441,7 @@ class APIService: ObservableObject {
             completion(.failure(APIError.invalidURL))
             return
         }
-        let payload: [String: Any] = ["trackOrders": orders.map { ["playlist_track_id": $0.playlistTrackId, "position": $0.position] }]
+        let payload: [String: Any] = ["trackOrders": orders.map { ["musicId": $0.musicId, "position": $0.position] }]
         let body = try? JSONSerialization.data(withJSONObject: payload)
         let request = createRequest(url: url, method: "PUT", body: body)
         performBasicOperation(request: request, defaultMessage: "Playlist reordered", completion: completion)
@@ -1068,7 +1068,7 @@ struct RemoteAlbum: Codable {
 }
 
 struct PlaylistReorderItem {
-    let playlistTrackId: Int
+    let musicId: Int
     let position: Int
 }
 

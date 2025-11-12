@@ -328,13 +328,8 @@ struct PlaylistDetailView: View {
     }
     
     private func saveReorder() {
-        let orders = tempSongs.enumerated().compactMap { index, song -> PlaylistReorderItem? in
-            guard let trackId = song.playlistTrackId else { return nil }
-            return PlaylistReorderItem(playlistTrackId: trackId, position: index)
-        }
-        guard !orders.isEmpty else {
-            editStatus = "Unable to reorder without playlist track IDs."
-            return
+        let orders = tempSongs.enumerated().map { index, song in
+            PlaylistReorderItem(musicId: song.id, position: index)
         }
         apiService.reorderPlaylist(playlistId: playlist.id, orders: orders) { result in
             switch result {

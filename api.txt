@@ -186,7 +186,7 @@ Endpoints (grouped)
 		- Body: { name?, description? } - Auth required
 
 	- PUT /api/playlists/:playlistId/reorder
-		- Body: { trackOrders: [ { playlist_track_id, position }, ... ] } - Auth required
+		- Body: { trackOrders: [ { musicId, position }, ... ] } - Auth required
 
 	- DELETE /api/playlists/:playlistId  (delete playlist)
 
