@@ -1,0 +1,734 @@
+
+API CONTRACT for music_app backend
+Generated: 2025-11-11
+
+Overview
+--------
+This document summarizes the HTTP API exposed by the backend (located in `backend/src/`). It lists endpoints grouped by area, required auth/access rules, example requests and responses, UX behaviors (latency, pagination, debounce), rate-limit and background-processing notes, and important security caveats.
+
+Globals
+-------
+- Base URL: http://<HOST>:3001 (default PORT from `.env` is 3001)
+- All API endpoints are prefixed with `/api/` (e.g. `/api/auth/login`, `/api/music/search`).
+- Authentication uses JWT Bearer tokens for most user-protected endpoints. Admin endpoints use HTTP Basic Auth with hardcoded credentials (see Security Notes).
+- Environment: `JWT_SECRET`, `JWT_EXPIRES_IN` are set in `/backend/.env.example`. Default `JWT_EXPIRES_IN=7d`.
+- Rate limiting: `generalLimiter` applied globally; `authLimiter` and `signupLimiter` applied to login/signup endpoints. (Limits are configured in rate limiter middleware.)
+
+General auth contract
+---------------------
+- User auth: Bearer <token> header where token = JWT returned by `/api/auth/login` or `/api/auth/signup`.
+- JWT payload contains at least { id, username }. Middleware exposes utilities:
+	- `authenticateJWT(req,res,next)` — Express middleware (in `jwtAuth.js`) to protect routes.
+	- `getUserIdFromToken(req)` — helper to extract user id from Bearer token.
+- Admin auth: Basic auth header `Authorization: Basic <base64(username:password)>`. Admin credentials are hardcoded in `admin.js` (username: `tokyo_houseparty`, password: `Ayfer5!@#$`).
+
+Response conventions
+--------------------
+- Success responses are JSON. Many endpoints return `{ success: true, ... }` or resource objects/arrays directly.
+- Errors return appropriate HTTP statuses and JSON: `{ error: 'Short code', message?: 'details' }`.
+- Streaming endpoints send audio bytes (Content-Type audio/*), support Range requests for seek/partial download.
+
+Endpoints (grouped)
+-------------------
+
+1) Authentication & User
+	- POST /api/auth/login
+		- Purpose: log in user and return JWT
+		- Body (application/json): { "username": "alice", "password": "secret" }
+		- Success (200): { "success": true, "user": { id, username, ... }, "token": "<JWT>" }
+		- Errors: 400 (missing fields), 401 (invalid credentials), 500
+		- Notes: `authLimiter` applies (rate-limited for brute-force prevention).
+
+	- POST /api/auth/signup
+		- Purpose: create new user and return JWT
+		- Body: { "username": "alice", "password": "VeryStr0ng!" }
+		- Success: { success: true, user: {...}, token: "<JWT>" }
+		- Validation: username/password validators run; returns 400 with `details` on weak/invalid input.
+
+	- GET /api/auth/me
+		- Purpose: return current authenticated user
+		- Headers: Authorization: Bearer <token>
+		- Success: { user: { id, username, theme_preference?, ... } }
+		- Errors: 401 if token missing/invalid
+
+	- GET /api/user/preferences
+		- Purpose: user preferences (theme, username)
+		- Headers: Authorization: Bearer <token> (this code uses a simplified token parsing but expects Bearer token)
+		- Success: { theme: 'apple-glass-black', username: 'alice' }
+
+	- POST /api/user/theme
+		- Purpose: set theme preference
+		- Body: { theme: 'apple-glass' }
+		- Auth: Bearer token required
+		- Success: { success: true, theme: 'apple-glass', message: 'Theme updated successfully' }
+
+2) Music (Deezer integration + streaming)
+	- GET /api/music/search?q=<query>&type=<track|artist|album>&limit=<n>
+		- Default: type=track, limit=30
+		- Calls Deezer public API; returns an array of normalized items.
+		- Item example: { id, title, artist, album, image, duration, preview, source: 'deezer', type }
+		- Errors: 400 if q missing, 500 on Deezer/network errors.
+		- UX: debounce on frontend recommended (see UX section).
+
+	- GET /api/music/trending?limit=<n>&type=<mixed|N>
+		- Returns mixed charts; default limit=12
+
+	- GET /api/music/track/:id
+		- Returns track details: { id, title, artist, album, image, duration, preview, releaseDate, source }
+
+	- GET /api/music/stream/:id
+		- Purpose: stream local music or proxy Deezer preview
+		- Behavior: supports Range headers (partial responses), sets Content-Type based on file extension.
+		- Cache: server maintains an in-memory stream cache for fast subsequent streams.
+		- Errors: 404 if not found or file missing; 500 on other failures.
+		- UX: expects low startup latency; streaming should begin quickly (< ~200ms on cache hit), see UX latency section.
+
+3) Library (local music library)
+	- GET /api/library/library?limit=<n>&offset=<n>
+		- Purpose: list user's/music library entries (backend supports user-specific filtering though `optionalAuth` is used)
+		- Query: limit (optional), offset (optional, default 0)
+		- Response: array of track objects (no wrapper) — each includes file_path, metadata, artwork fields.
+		- Note: If limit is omitted the route may return entire library (use with care).
+
+	- GET /api/library/search?q=<query>&limit=<n>
+		- Purpose: local search (uses musicScanner)
+		- Default limit: 50 (route default)
+		- Response: array of local track objects with `isLocal: true, source: 'local'`.
+
+	- GET /api/library/artist/:artist and GET /api/library/album/:album
+		- Purpose: browse by artist/album
+
+	- GET /api/library/stream/:id
+		- Purpose: stream a local file (same contract as /api/music/stream/:id)
+
+	- POST /api/library/scan or /api/library/scan-library
+		- Purpose: trigger manual file system scan; runs scan asynchronously and returns a summary when complete.
+		- Auth: optionalAuth used, may allow anonymous trigger in current server code.
+		- Response: { success: true, scanned, added, updated, removed, message }
+		- Side-effects: invalidates server caches and starts background artwork fetch + playlist cleanup tasks.
+
+	- POST /api/library/invalidate-cache
+		- Purpose: clear library cache (admin/infra use)
+		- Response: { success: true, message }
+
+	- POST /api/library/fetch-artwork
+		- Body: { artist, album }
+		- Fetches artwork and returns { albumArt: 'found'|'not found', artistImage: 'found'|... }
+
+	- GET /api/library/stats
+		- Returns counts and storage totals: { totalSongs, totalArtists, totalAlbums, totalStorage, totalStorageBytes }
+
+4) Downloads & URL/Playlist import
+	- POST /api/download/add
+		- Body: { title, artist, album?, playlistId? }
+		- Behavior: creates a download entry immediately and starts asynchronous download using spotdl/yt-dlp.
+		- Response (immediate): { success: true, downloadId, message: 'Starting music download...' }
+		- Later: GET /api/download/status/:downloadId to poll status.
+
+	- GET /api/download/list
+		- Returns { success: true, downloads: [...] }
+
+	- GET /api/download/status/:downloadId
+		- Returns download object (status, progress, metadata)
+
+	- DELETE /api/download/cancel/:downloadId
+		- Cancels download (sets status cancelled)
+
+	- DELETE /api/download/delete/:downloadId
+		- Removes download history entry (does not delete files in library)
+
+	- POST /api/download/spotify-playlist and /api/spotify-playlist/import
+		- Body: { playlistUrl }
+		- Behavior: attempts to extract track list using spotdl; if extraction succeeds will schedule sequential downloads (1 per minute) to avoid rate limits.
+		- Response: often returns { success: true, playlistName, trackCount, sequentialMode: true, timeEstimate }
+		- If Spotify rate limit detected: 429 response with useful `waitTime` hint.
+
+	- POST /api/download/sequential-scan and POST /api/download/sequential-playlist
+		- Used to start a sequential scanning or download workflow with throttling (10s between scans or 60s between downloads by default implementation).
+
+	- POST /api/url-download/song
+		- Body: { url, playlistId? }
+		- Supports Spotify track URLs and YouTube video URLs; runs spotdl in background and move file to library when complete.
+		- Immediate response: { success: true, downloadId, message }
+
+	- POST /api/url-download/youtube-playlist
+		- Extracts YouTube playlist and schedules sequential downloads similar to Spotify import.
+
+5) Playlists
+	- POST /api/playlists/   (create playlist)
+		- Auth: Bearer token required
+		- Body: { name, description? }
+		- Success: 201 { success: true, playlist: { id, name, description, track_count, created_at } }
+
+	- GET /api/playlists/   (list playlists)
+		- Auth: Bearer token required
+		- Success: { success: true, playlists: [...] }
+
+	- GET /api/playlists/:playlistId
+		- Auth: Bearer token required
+		- Success: { success: true, playlist: { ... , tracks: [...] } }
+
+	- GET /api/playlists/:playlistId/tracks
+		- Auth: Bearer token required
+		- Returns { success: true, tracks }
+
+	- POST /api/playlists/:playlistId/tracks
+		- Auth: Bearer token required
+		- Body: { musicId, position? }
+		- Success: 201 { success: true, message, playlist_track_id }
+		- Errors: 400 missing musicId; 404 track not found; 409 track already in playlist
+
+	- DELETE /api/playlists/:playlistId/tracks/:musicId
+		- Auth: Bearer token required
+		- Success: { success: true }
+
+	- PUT /api/playlists/:playlistId (update name/description)
+		- Body: { name?, description? } - Auth required
+
+	- PUT /api/playlists/:playlistId/reorder
+		- Body: { trackOrders: [ { playlist_track_id, position }, ... ] } - Auth required
+
+	- DELETE /api/playlists/:playlistId  (delete playlist)
+
+	- POST /api/playlists/cleanup-duplicates and POST /api/playlists/cleanup-orphaned
+		- Auth: Bearer token required for duplicates cleanup; orphaned cleanup sometimes allowed without strict auth
+		- Returns cleanup stats
+
+6) File manager
+	- GET /api/files/list?path=<path>
+		- Returns directory listing with items: { name, type: 'folder'|'file', size, modified, path }
+		- Security: path is sanitized and must stay under backend/music directory.
+
+	- POST /api/files/create-folder  Body: { path, name }
+	- POST /api/files/upload (multipart form, field name `file`, optional uploadPath)
+	- POST /api/files/rename Body: { path, newName }
+	- POST /api/files/delete Body: { path }
+		- All file manager operations perform safety checks to ensure paths remain within `backend/music`.
+
+7) Admin (protected by Basic auth)
+	- GET /api/admin/users (requires Basic auth)
+	- GET /api/admin/user-status
+	- GET /api/admin/stats
+	- GET /api/admin/user-stats
+	- POST /api/admin/update-ytdlp, POST /api/admin/update-spotdl (exec pip to update tools)
+	- GET /api/admin/check-versions
+	- GET /api/admin/disk-usage and /system-stats
+	- GET /api/admin/most-played
+	- GET /api/admin/music?page=<n>&limit=<n> (pagination)
+	- DELETE/PUT /api/admin/users/:userId
+	- POST /api/admin/cleanup-duplicates and /cleanup-invalid-paths
+
+Security notes
+--------------
+- JWT secret: stored in environment variable `JWT_SECRET` — must be set to a secure 64-byte random string in production.
+- Admin credentials are hardcoded in `admin.js` — this is insecure for production. Replace with proper env-backed credentials or admin user store.
+- File manager ensures path containment, but any upload/rename/delete endpoints should be used with trusted users only.
+- Background commands (spotdl, yt-dlp, ffmpeg) are executed with spawn; ensure runtime environment is secured and these binaries cannot be influenced by untrusted input.
+
+UX-specific behaviors and recommendations
+--------------------------------------
+- Search debounce: frontend should debounce user typing for music search (both Deezer and local search) with a 300ms debounce. For aggressive UIs 250-400ms is recommended.
+- Search page size / defaults:
+	- `/api/music/search` (Deezer): default limit = 30; recommended page size for UI = 30; max safe limit ~100.
+	- Local `/api/library/search`: default limit = 50; recommended page size = 50.
+	- Admin `/api/admin/music`: default limit = 50; page parameter available.
+- Pagination: endpoints that support pagination use limit + offset or page+limit (admin music uses page+limit). Use limit <= 100 for reasonable memory.
+- Streaming latency expectations:
+	- Cache hit: audio streaming should begin within ~100-300ms on a healthy server and local network.
+	- Cache miss: expect additional file stat and FS operations — startup latency could be 200-800ms depending on disk I/O.
+	- Proxyed Deezer previews depend on external network latency — plan for 200ms–1500ms.
+- Downloads and imports:
+	- Download endpoints return immediately and perform downloads asynchronously.
+	- Spotify/YouTube playlist import uses sequential downloads to avoid rate limits: default throttling is 1 download per minute. Expect full playlist imports to take minutes to hours depending on size.
+	- Sequenced scan endpoints use 10s intervals between attempts to extract metadata; long-running operations run in background so UI should poll `/api/download/status/:id` or use downloads list.
+- Caching:
+	- Library has a server-side cache (5-minute TTL). Explicit cache invalidation endpoints exist (`/api/library/invalidate-cache`). Artwork fetching is done in background after scans.
+- Retries and fallbacks:
+	- Download logic contains multiple fallback strategies (retry with cleaned query, use yt-dlp, etc.). UI should display statuses: searching -> downloading -> completed/failed.
+
+Examples
+--------
+
+1) Login
+Request:
+POST /api/auth/login
+Content-Type: application/json
+Body: { "username": "alice", "password": "secret" }
+
+Response 200:
+{
+	"success": true,
+	"user": { "id": 12, "username": "alice", "is_active": 1 },
+	"token": "eyJhbGciOi..."
+}
+
+2) Search Deezer tracks
+GET /api/music/search?q=daft+punk&type=track&limit=20
+
+Response 200: [ { id, title, artist, album, image, duration, preview, source: 'deezer' }, ... ]
+
+3) Stream local track (range support)
+GET /api/library/stream/1234
+Headers: Range: bytes=0- (optional)
+
+Response: audio/mpeg (or other audio/*). If Range provided, server responds 206 Partial Content.
+
+4) Start a download
+POST /api/download/add
+Body: { "title": "Song Title", "artist": "Artist Name", "album": "Album Name" }
+
+Response 200: { success: true, downloadId: "dl_169...", message: 'Starting music download...' }
+
+Polling status:
+GET /api/download/status/dl_169...
+Response: { id, title, artist, status: 'downloading'|'completed'|'failed'|'searching'|'cancelled', progress: 0-100 }
+
+Contract completeness checklist
+------------------------------
+- Endpoints: cataloged (auth, music, library, download, url-download, playlists, files, admin).
+- Request/response examples: included for the most common interactions.
+- Auth rules: JWT for users, Basic for admin (noted insecure).
+- UX behaviors: debounce=300ms, pagination defaults, streaming latency, download throttling described.
+
+Next steps & recommended improvements
+-----------------------------------
+1) Replace hardcoded admin credentials with environment-based secrets or admin user store.
+2) Document exact rate-limiter settings (open `middleware/rateLimiter.js`) and include numerical limits in contract.
+3) Add OpenAPI/Swagger definition programmatically to cover all routes and types for client generation.
+4) Frontend: implement search debounce (300ms) and polling on long-running import operations.
+
+End of contract
+
+
+BACKEND IMPLEMENTATION GUIDE (server-side helpers, function contracts, DB expectations)
+--------------------------------------------------------------------------
+This section contains practical server-side helper function signatures, flow diagrams, and implementation notes you can copy into the backend (Node.js) so your Swift front end has clear server support. Focus areas: download lifecycle, playlist import, streaming, file movement, database methods, and admin improvements.
+
+1) Environment & binaries
+ - Required environment variables (add these to `.env`):
+	 - PORT (default 3001)
+	 - JWT_SECRET (required, long random secret)
+	 - JWT_EXPIRES_IN (e.g. 7d)
+	 - AUTO_SCAN=true|false
+	 - DOWNLOADS_PATH (optional, default backend/downloads)
+	 - MUSIC_PATH (optional, default backend/music)
+	 - ADMIN_USERNAME, ADMIN_PASSWORD (replace hardcoded admin credentials)
+
+ - External binaries (server must have):
+	 - python3 + spotdl module (spotdl) for Spotify extraction and downloading
+	 - yt-dlp for YouTube fallback
+	 - ffmpeg for on-the-fly transcoding (if required)
+
+2) Download lifecycle (contract)
+ - States: searching -> downloading -> completed | failed | cancelled
+ - Data model (downloads table):
+	 - id (string), user_id (nullable), playlist_id (nullable), title, artist, album,
+		 status (enum), progress (0-100), created_at, updated_at, error_message (nullable)
+
+ - Database helper signatures (expected to exist in `database.js`):
+	 - async getDownloads(): Promise<Array<Download>>
+	 - async addDownload(download: Partial<Download>): Promise<void>
+	 - async getDownloadById(id: string): Promise<Download|null>
+	 - async updateDownloadStatus(id: string, status: string, progress?: number, error_message?: string): Promise<void>
+	 - async deleteDownload(id: string): Promise<void>
+
+ - Server helper signatures (suggested file: `src/services/downloadManager.js`):
+	 - async createDownloadEntry({ title, artist, album, userId, playlistId }) -> downloadId
+	 - async startDownloadWorker(downloadId) -> starts background process (non-blocking)
+	 - async cancelDownload(downloadId) -> attempts to cancel running process and mark cancelled
+	 - async getDownloadProgress(downloadId) -> {status, progress, message}
+
+ Example implementation sketch (Node.js, high-level):
+
+ // src/services/downloadManager.js
+ import { spawn } from 'child_process';
+ import path from 'path';
+ import fs from 'fs';
+ import Database from '../database.js';
+
+ const db = new Database();
+
+ export async function createDownloadEntry({ title, artist, album, userId, playlistId }) {
+	 const id = `dl_${Date.now()}`;
+	 await db.addDownload({ id, title, artist, album, status: 'searching', progress: 0, created_at: new Date().toISOString(), user_id: userId, playlist_id: playlistId });
+	 // Kick off worker asynchronously
+	 startDownloadWorker(id).catch(err => console.error('Download worker error:', err));
+	 return id;
+ }
+
+ export async function startDownloadWorker(downloadId) {
+	 const dl = await db.getDownloadById(downloadId);
+	 if (!dl) throw new Error('Download not found');
+
+	 await db.updateDownloadStatus(downloadId, 'downloading', 5);
+
+	 // Build output dir
+	 const outDir = path.join(process.cwd(), 'downloads', downloadId);
+	 fs.mkdirSync(outDir, { recursive: true });
+
+	 // Primary attempt: spotdl
+	 const query = `${dl.artist} ${dl.title}`;
+	 const proc = spawn('python3', ['-m', 'spotdl', 'download', query, '--output', outDir, '--format', 'mp3', '--bitrate', '320k', '--overwrite', 'skip']);
+
+	 // Listen for stdout to update progress heuristically
+	 proc.stdout.on('data', async (data) => {
+		 const text = data.toString();
+		 // heuristics: if 'Downloaded:' or percent -> update progress
+		 if (text.includes('Downloaded')) await db.updateDownloadStatus(downloadId, 'downloading', 90);
+	 });
+
+	 proc.on('close', async (code) => {
+		 if (code === 0) {
+			 // Move file to library and mark completed
+			 try {
+				 // find mp3 file in outDir (prefer recently created)
+				 const files = fs.readdirSync(outDir).filter(f => f.endsWith('.mp3'));
+				 if (files.length === 0) throw new Error('No mp3 file found');
+				 const mp3 = path.join(outDir, files[0]);
+				 const musicId = await moveSingleFileToLibrary(mp3, dl.title, dl.artist, dl.album, dl.user_id);
+				 await db.updateDownloadStatus(downloadId, 'completed', 100);
+			 } catch (err) {
+				 await db.updateDownloadStatus(downloadId, 'failed', 0, err.message);
+			 }
+		 } else {
+			 // retry fallback strategies (yt-dlp, cleaned query) - limited attempts
+			 await db.updateDownloadStatus(downloadId, 'failed', 0, `spotdl exit code ${code}`);
+		 }
+	 });
+ }
+
+ // Note: add cancellation logic by keeping a map of spawn processes and killing them on cancelDownload
+
+3) moveSingleFileToLibrary contract (already present in repository)
+ - Signature used in code: async moveSingleFileToLibrary(filePath, title, artist, album, userId) -> returns musicId
+ - Responsibilities:
+	 - Sanitize artist/album/title strings
+	 - Build folder structure: MUSIC_PATH/Artist/Album/Song.ext
+	 - Copy or move file into library
+	 - Fetch artwork (call artworkService.fetchAlbumArt/fetchArtistImage)
+	 - Call database.addMusicToLibrary(newFilePath, metadata, userId) and return inserted music id
+
+4) Playlist import throttling & sequential downloads
+ - The server intentionally sequences playlist downloads at 1 minute per track to avoid Spotify rate limits.
+ - API endpoints return immediately and schedule background downloads using setTimeout loops (current implementation uses setTimeout per track).
+ - If you want reliability + restarts across reboots, replace in-memory timers with a persistent job queue (recommended: BullMQ + Redis). That allows monitoring, retries, and graceful resume.
+
+5) Streaming & signed URL option
+ - Current approach: stream directly from `/api/library/stream/:id` and support Range requests.
+ - If you need to authenticate streaming for mobile clients (Swift audio player cannot set Authorization on <audio> equivalent), consider creating short-lived signed URLs:
+	 - Endpoint: GET /api/stream-signed/:id -> verifies token then returns JSON { url: 'http://<host>/s3-proxy/...' , expires_at }
+	 - Implementation: create an authenticated endpoint that generates a signed URL (or temporary proxy route) and stores a one-time token in memory/DB with TTL.
+
+6) Admin credential improvement (suggested change)
+ - Replace hardcoded `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `backend/src/routes/admin.js` with env variables and fallback hardcoded (but warn). Example change at top of file:
+	 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'tokyo_houseparty';
+	 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Ayfer5!@#$';
+
+7) Rate-limiter values (documented from `middleware/rateLimiter.js`)
+ - authLimiter: 10 requests / 15 minutes (for login attempts)
+ - signupLimiter: 5 requests / 1 hour (signup)
+ - generalLimiter: 100 requests / 1 minute (skips static asset routes)
+
+8) Database function checklist (implement if missing)
+ - getMusicLibrary(limit, offset, userId)
+ - getMusicById(id)
+ - findMusicByArtistAndTitle(artist, title)
+ - addMusicToLibrary(filePath, metadata, userId) -> returns { id }
+ - updateMusicArtwork(musicId, albumArtUrl, artistImageUrl)
+ - addDownload(downloadObject)
+ - updateDownloadStatus(id, status, progress, error_message?)
+ - getDownloads(), deleteDownload(id)
+ - createPlaylist(userId, name, description)
+ - getPlaylists(userId), getPlaylistById(playlistId, userId)
+ - addTrackToPlaylist(playlistId, musicId, position, userId)
+
+9) Logging & observability
+ - Ensure errors and long-running operations are logged with timestamps and downloadId/playlistId for traceability. The current code logs many debug messages; consider an aggregated logger (winston) and optionally a structured JSON log format for ingestion by log collectors.
+
+10) Testing & health checks
+ - `/api/health` exists to report DB and scanner readiness. Use this in Kubernetes/liveness probes.
+ - Write unit tests for key download flows: createDownloadEntry + startDownloadWorker (mock spawn) and moveSingleFileToLibrary (mock FS ops).
+
+11) Quick shell commands (for deploy/setup)
+ - Install tools (Ubuntu/Debian):
+ ```bash
+ sudo apt update
+ sudo apt install -y python3 python3-pip ffmpeg
+ pip3 install --user spotdl yt-dlp
+ ```
+
+12) How your Swift frontend should interact (brief)
+ - Authenticate with `/api/auth/login` to receive JWT and send it as Authorization: Bearer <token> for protected endpoints.
+ - For starting downloads/imports call `/api/download/add` or `/spotify-playlist/import` and poll `/api/download/status/:id` for progress.
+ - For streaming use `/api/library/stream/:id` and attach Authorization header if required; if Authorization cannot be applied in native audio player, use server-generated signed URL endpoint described in section 5.
+
+End of backend implementation guide
+
+SPOTIFY & URL IMPORT — endpoints and detailed flow
+-------------------------------------------------
+This section documents the exact API endpoints and the server-side flow for importing Spotify playlists and importing single songs from Spotify/YouTube URLs. It lists request/response examples, background processing notes, rate-limit behavior (what to expect), and failure modes the client should handle.
+
+Endpoints
+---------
+- POST /api/spotify-playlist/import
+	- Body: { "playlistUrl": "https://open.spotify.com/playlist/..." }
+	- Auth: optional (can accept token to tie imported playlist to a user)
+	- Success 200 (typical):
+		{
+			"success": true,
+			"playlistName": "My Playlist",
+			"trackCount": 120,
+			"message": "Found \"My Playlist\" with 120 songs! Starting sequential scan automatically to avoid rate limits.",
+			"sequentialMode": true,
+			"timeEstimate": "120 minutes"
+		}
+	- Possible error 429 (Spotify rate limit):
+		{
+			"error": true,
+			"rateLimited": true,
+			"message": "Spotify rate limit reached. Please wait 15-20 minutes.",
+			"waitTime": 15
+		}
+	- Possible error 500: parsing failure or no tracks found.
+
+- POST /api/download/spotify-playlist
+	- Alternate route used by older clients; same body and behavior as `/api/spotify-playlist/import`.
+
+- POST /api/download/sequential-playlist
+	- Body used internally to start sequential downloads when you already have `playlistName` and `tracks` array.
+	- Body: { playlistName: string, tracks: [ { title, artist, album?, duration? }, ... ] }
+	- Server returns immediate ack and schedules downloads (1 per minute).
+
+- POST /api/url-download/song
+	- Body: { "url": "<spotify track url or youtube video url>", "playlistId": <optional playlist id> }
+	- Auth: optional (if token present, download is tied to user_id)
+	- Success 200: { success: true, downloadId: "url_...", message: "Starting download from spotify...", source: 'spotify' }
+	- Error: 400 for invalid URL, 500 for server errors.
+
+- POST /api/url-download/youtube-playlist
+	- Body: { url: "<youtube playlist url>", playlistName?: "Friendly name" }
+	- Behavior: extracts track list and calls sequential import flow (similar to Spotify import)
+
+Detailed server flow (playlist import)
+-------------------------------------
+1) Client calls POST /api/spotify-playlist/import with `playlistUrl`.
+2) Server sanitizes URL (removes tracking params) and spawns `python3 -m spotdl save <url> --save-file <tmpfile>` to extract the playlist.
+	 - The server sets UTF-8 environment variables for reliable parsing and uses a timeout (current implementation: up to 3 minutes) to allow large playlists to be extracted.
+3) spotdl writes a `.spotdl` JSON file (or prints the output). The server waits for the file for a short period (up to several seconds checks) and then reads/parses it.
+4) On successful parse the server transforms tracks into a canonical array: { title, artist, album, duration }.
+5) Server responds to client immediately confirming playlist found and that a sequential import will start. Response includes `trackCount`, `playlistName`, and a rough `timeEstimate` (1 minute per track by default).
+6) Server schedules sequential downloads (setTimeout per track) at ~60s intervals by default. For each track:
+	 - It checks if the track already exists in the library (database.findMusicByArtistAndTitle).
+	 - If exists: auto-adds the existing track to the playlist in DB (skip download).
+	 - If not exists: creates a download entry in `downloads` table and launches `spotdl` (or fallback `yt-dlp`) to fetch the track, then moves it to the library via `moveSingleFileToLibrary`.
+7) For each completed track download: server adds track to playlist and updates download status to `completed`.
+8) If `spotdl` fails and rate limiting is detected, server will mark the request as failed or respond with a rate-limit hint (429) and abort or delay further downloads.
+
+Detailed server flow (single-song URL import)
+---------------------------------------------
+1) Client calls POST /api/url-download/song with a Spotify or YouTube track URL.
+2) Server validates URL, creates a download row with status `searching` and returns a `downloadId` immediately.
+3) Background worker spawns `spotdl download <url>` (or `yt-dlp` fallback). It writes output to a temporary download directory for that downloadId.
+4) Worker monitors stdout/stderr to heuristically update progress (database.updateDownloadStatus(downloadId, 'downloading', progress)).
+5) On success: worker identifies the MP3 file, calls `moveSingleFileToLibrary` to move/copy it into the organized library path, fetches artwork, adds DB entries, and marks download completed in `downloads`.
+6) On failure: worker retries based on fallback strategies (cleaned up query, use yt-dlp) up to a small number of attempts, then marks `failed` with `error_message`.
+
+Polling and status model
+------------------------
+- Use GET /api/download/status/:downloadId to poll the status. The returned object includes:
+	- id, title, artist, status (searching|queued|downloading|completed|failed|cancelled), progress (0-100), error_message?, created_at, updated_at
+- Client behavior recommendations:
+	- Poll every 3–10s for interactive UI; slow down polling for large numbers of items.
+	- For playlist imports, show overall progress as (completedTracks / totalTracks). Use server timeEstimate to display ETA.
+	- Respect 429 responses: back off for indicated waitTime (minutes).
+
+Failure modes & server responses
+--------------------------------
+- 429 Rate limit (Spotify): returned when spotdl reports rate limiting. Response contains `rateLimited: true` and `waitTime` (minutes).
+- 400 Bad Request: invalid URL or missing parameters.
+- 500 Server error: parsing failure, unexpectedly missing `.spotdl` file, or local binary failures. The server will write `error_message` to the `downloads` row where applicable.
+
+Security & quotas
+-----------------
+- Imports and downloads may be CPU- and IO-intensive. The server enforces global `generalLimiter` (100 req/min) and special `authLimiter` for auth endpoints. Consider adding a per-user concurrent-download quota if needed.
+- Only authenticated users should be able to trigger server-side actions tied to their account (e.g., auto-adding to user-specific playlist). The import endpoints accept tokens to associate the resulting playlist/downloads to a user.
+
+Examples
+--------
+1) Import a Spotify playlist
+Request:
+POST /api/spotify-playlist/import
+Content-Type: application/json
+Body: { "playlistUrl": "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M" }
+
+Successful response (200):
+{
+	"success": true,
+	"playlistName": "Today’s Top Hits",
+	"trackCount": 50,
+	"message": "Found \"Today’s Top Hits\" with 50 songs! Starting sequential scan automatically to avoid rate limits.",
+	"sequentialMode": true,
+	"timeEstimate": "50 minutes"
+}
+
+2) Import a single Spotify track by URL
+Request:
+POST /api/url-download/song
+Body: { "url": "https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6" }
+
+Response (200): { success: true, downloadId: "url_169...", message: "Starting download from spotify...", source: 'spotify' }
+
+Notes for mobile/Swift clients
+-----------------------------
+- Because imports are asynchronous and long-running, your client should always show immediate acknowledgement and then poll `/api/download/status/:id` for the download's lifecycle.
+- For playlist imports present a clear ETA and a per-track progress display. Do not expect instant completion for large playlists.
+- Handle 429 responses gracefully: show a friendly message and suggest retry after the specified `waitTime`.
+
+End of Spotify & URL import section
+
+
+USERS, PERMISSIONS & DATA MODEL (detailed)
+----------------------------------------
+This section documents user roles, permissions, key database tables and fields, and the complete download lifecycle from the user's perspective. It also clarifies which endpoints are admin-only and how you should enforce access.
+
+1) User roles and permissions
+- Roles:
+	- user (regular authenticated user): can manage their own playlists, start downloads, view/download local library entries they have access to, update preferences.
+	- admin: has access to administration endpoints under `/api/admin/*` (user listing, system stats, tool updates, cleanup operations).
+
+- Enforcement/Notes (current code):
+	- Regular user auth is JWT-based (Bearer token). Endpoints that require a user currently call `getUserIdFromToken` or use `authenticateJWT` in `jwtAuth.js`.
+	- Some library routes use `optionalAuth` (they accept anonymous requests and return global results). If you require user-scoped behavior (e.g., user-specific libraries), change `optionalAuth` to enforce authentication.
+	- Admin endpoints are currently protected by Basic Auth in `admin.js` using hardcoded credentials; treat these routes as admin-only. Replace with environment-backed credentials or admin accounts.
+
+2) Database model - main tables (simplified column lists)
+- users
+	- id INTEGER PRIMARY KEY
+	- username TEXT UNIQUE
+	- password_hash TEXT
+	- is_active INTEGER DEFAULT 1
+	- theme_preference TEXT
+	- created_at DATETIME
+	- last_login DATETIME
+
+- music_library (tracks)
+	- id INTEGER PRIMARY KEY
+	- title TEXT
+	- artist TEXT
+	- album TEXT
+	- file_path TEXT
+	- file_size INTEGER
+	- duration INTEGER
+	- album_cover TEXT (cached URL/path)
+	- artist_image TEXT
+	- created_at DATETIME
+	- user_id INTEGER NULLABLE (owner or who added it)
+
+- downloads
+	- id TEXT PRIMARY KEY (e.g. 'dl_163...')
+	- user_id INTEGER NULLABLE
+	- playlist_id INTEGER NULLABLE
+	- title TEXT
+	- artist TEXT
+	- album TEXT
+	- status TEXT (enum: searching, queued, downloading, completed, failed, cancelled)
+	- progress INTEGER (0-100)
+	- error_message TEXT NULLABLE
+	- created_at DATETIME
+	- updated_at DATETIME
+
+- playlists
+	- id INTEGER PRIMARY KEY
+	- user_id INTEGER
+	- name TEXT
+	- description TEXT
+	- created_at DATETIME
+
+- playlist_tracks
+	- id INTEGER PRIMARY KEY
+	- playlist_id INTEGER
+	- music_id INTEGER
+	- position INTEGER
+
+3) Download lifecycle (user-visible)
+- Step 1: User requests download (POST `/api/download/add` or `/api/url-download/song`). Server immediately creates a `downloads` row with status `searching` and returns downloadId.
+- Step 2: Background worker attempts to download using `spotdl` (or `yt-dlp` fallback). Status updates: `downloading` with heuristic progress updates.
+- Step 3: On successful download, the worker calls `moveSingleFileToLibrary` which:
+		- sanitizes metadata and filenames
+		- moves file into `MUSIC_PATH/Artist/Album/Title.ext`
+		- fetches artwork and artist image (via artworkService)
+		- calls `addMusicToLibrary` in DB, adding a track row and returning music id
+		- optionally auto-adds the new music id to the playlist if `playlist_id` was provided
+- Step 4: Worker sets download status to `completed` and progress to 100; if errors occur, sets `failed` with `error_message`.
+- Step 5: UI polls `/api/download/status/:id` to update progress and show final result.
+
+Important: downloads are executed asynchronously and may take many seconds or minutes (playlist imports are throttled to ~1 track/minute).
+
+4) Access control rules & endpoint mapping
+- Public (no auth required):
+	- /api/music/search (calls external Deezer) — requires no auth
+	- /api/music/trending, /api/music/track/:id (public)
+	- GET /api/health
+
+- Authenticated (Bearer JWT required):
+	- POST /api/auth/logout (if implemented), GET /api/auth/me
+	- /api/playlists/* (create, update, add/remove tracks) — user must own the playlist
+	- /api/download/add (starting downloads tied to user), /api/download/list (if you want per-user lists)
+	- /api/library endpoints that modify user data (scan adding to user library, add-all-to-my-library)
+
+- OptionalAuth / Mixed (currently accepts anonymous but may return user-scoped results if token present):
+	- /api/library/* many endpoints use `optionalAuth` — they accept requests without auth and may return global results. If you want user-specific behavior, enforce JWT auth.
+
+- Admin-only (Basic Auth currently; move to env-backed or admin JWT):
+	- All `/api/admin/*` endpoints. Admin operations include: user listing, stats, tool updates, cleanup, disk-usage, system-stats, delete/update users, and version checks.
+
+5) Data policies & recommended safeguards
+- Only authenticated users should be able to mutate resources tied to their account (playlists, user library additions). Audit current routes for places where `optionalAuth` or missing middleware allows anonymous mutations.
+- When deleting users (admin action), cascade delete or reassign content carefully: remove playlists and orphan playlist_tracks, but consider archiving instead of permanent deletion.
+- Downloads table retains history; add TTL or cleanup policies (`/api/download/cleanup` exists) to prune old entries.
+
+6) Example SQL snippets (SQLite)
+- Create users
+CREATE TABLE users (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	username TEXT UNIQUE NOT NULL,
+	password_hash TEXT NOT NULL,
+	is_active INTEGER DEFAULT 1,
+	theme_preference TEXT,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_login DATETIME
+);
+
+- Create downloads
+CREATE TABLE downloads (
+	id TEXT PRIMARY KEY,
+	user_id INTEGER,
+	playlist_id INTEGER,
+	title TEXT,
+	artist TEXT,
+	album TEXT,
+	status TEXT,
+	progress INTEGER DEFAULT 0,
+	error_message TEXT,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME
+);
+
+7) Admin access details
+- Current implementation: Basic auth header required for `/api/admin/*`. The credentials are hardcoded in `backend/src/routes/admin.js` (insecure). Only requests with correct Basic auth will succeed; other requests return 401.
+- Recommended migration steps for production:
+	1) Move admin username/password to environment variables (`ADMIN_USERNAME`, `ADMIN_PASSWORD`).
+	2) Consider creating a special `is_admin` flag on `users` table and allow admin access via JWT tokens issued to admin users (more auditable). If you do this, replace Basic Auth middleware with `authenticateJWT` + `checkIsAdmin`.
+
+8) How Swift front end should present capabilities to users
+- For regular users: show Downloads screen listing their downloads from `/api/download/list` (server may be global list; you can filter by user if API returns user_id or update server to scope to requesting user).
+- For playlist imports: show clear time estimates and a per-track ETA; explain sequential import throttling (~1 track/min) to set expectations.
+- For admin users: provide a separate Admin UI (protected by a special login) that hits `/api/admin/*` only after verifying admin credentials. Do not expose admin routes or tokens in the client app unguarded.
+
+If you'd like, I can now:
+- (A) Add SQL migrations / create-table scripts into `backend/` to match these tables.
+- (B) Implement `src/services/downloadManager.js` and wire it into `download.js` route to centralize worker logic (includes cancellation map and retries).
+- (C) Replace hardcoded admin credentials with environment-backed config in `backend/src/routes/admin.js`.
+
+Tell me which of A/B/C to implement next and I'll create the files and wiring in the repo.
+

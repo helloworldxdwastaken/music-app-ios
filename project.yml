@@ -1,0 +1,58 @@
+# XcodeGen Project Specification for Music Stream iOS App
+name: MusicStream
+
+options:
+  bundleIdPrefix: com.musicstream
+  deploymentTarget:
+    iOS: 15.0
+  
+settings:
+  base:
+    DEVELOPMENT_TEAM: "" # Set your team ID here
+    CODE_SIGN_IDENTITY: "Apple Development"
+    PRODUCT_BUNDLE_IDENTIFIER: com.tokyo.noxa 
+
+targets:
+  MusicStream:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: .
+        name: MusicStream
+        excludes:
+          - "*.md"
+          - "*.sh"
+          - "*.yml"
+          - "build"
+          - "*.xcodeproj"
+          - "*.xcworkspace"
+          - ".git"
+          - ".github"
+          - ".gitignore"
+    settings:
+      base:
+        PRODUCT_NAME: "Noxa Music"
+        PRODUCT_BUNDLE_IDENTIFIER: com.noxamusic.app
+        INFOPLIST_FILE: Info.plist
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        ASSETCATALOG_COMPILER_INCLUDE_SIMULATOR_ASSETS: NO
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Noxa Music
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+
