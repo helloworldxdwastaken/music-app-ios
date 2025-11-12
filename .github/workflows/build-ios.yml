@@ -57,8 +57,15 @@ jobs:
       
       - name: Package unsigned IPA
         run: |
+          set -euo pipefail
+          APP_PATH=$(find "build/MusicStream.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" | head -n 1)
+          if [[ -z "$APP_PATH" ]]; then
+            echo "No .app found inside archive."
+            exit 1
+          fi
+          APP_NAME=$(basename "$APP_PATH")
           mkdir -p build/Payload
-          cp -R "build/MusicStream.xcarchive/Products/Applications/Music Stream.app" "build/Payload/Music Stream.app"
+          cp -R "$APP_PATH" "build/Payload/$APP_NAME"
           (cd build && /usr/bin/zip -r MusicStream-unsigned.ipa Payload)
       
       - name: Upload IPA
