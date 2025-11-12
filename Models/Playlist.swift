@@ -78,3 +78,8 @@ struct PlaylistTrackItem: Codable {
         try container.encode(song, forKey: .song)
     }
 }
+
+struct CreatePlaylistResponse: Codable {
+    let success: Bool
+    let playlist: Playlist
+}

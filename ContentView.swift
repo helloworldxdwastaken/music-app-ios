@@ -12,7 +12,19 @@ struct ContentView: View {
     @EnvironmentObject var connectivity: ConnectivityService
     @EnvironmentObject var offlineManager: OfflineManager
     @State private var selectedTab = 0
-    
+    @State private var showingCreateSheet = false
+    @State private var showingSearch = false
+
+    private let tabItems: [CustomTabBarView.TabItem] = [
+        .init(title: "Home", systemImage: "house.fill", tag: 0),
+        .init(title: "Library", systemImage: "music.note.list", tag: 1),
+        .init(title: "Create", systemImage: "plus.circle", tag: 2)
+    ]
+
+    init() {
+        UITabBar.appearance().isHidden = true
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             TabView(selection: $selectedTab) {
@@ -21,75 +33,70 @@ struct ContentView: View {
                         Label("Home", systemImage: "house.fill")
                     }
                     .tag(0)
-                
-                SearchView()
-                    .tabItem {
-                        Label("Search", systemImage: "magnifyingglass")
-                    }
-                    .tag(1)
-                
+
                 LibraryView()
                     .tabItem {
                         Label("Library", systemImage: "music.note.list")
                     }
+                    .tag(1)
+
+                Color.clear
+                    .tabItem {
+                        Label("Create", systemImage: "plus.circle")
+                    }
                     .tag(2)
-                
-                DownloadsView()
-                    .tabItem {
-                        Label("Downloads", systemImage: "tray.and.arrow.down")
-                    }
-                    .tag(3)
-                
-                SettingsView()
-                    .tabItem {
-                        Label("Settings", systemImage: "gearshape.fill")
-                    }
-                    .tag(4)
-                
             }
-            .accentColor(.green)
-            .onAppear {
-                // Configure native tab bar appearance
-                let appearance = UITabBarAppearance()
-                appearance.configureWithOpaqueBackground()
-                appearance.backgroundColor = UIColor.systemBackground
-                
-                // Selected tab item
-                appearance.stackedLayoutAppearance.selected.iconColor = UIColor.systemGreen
-                appearance.stackedLayoutAppearance.selected.titleTextAttributes = [
-                    .foregroundColor: UIColor.systemGreen
-                ]
-                
-                // Normal tab item
-                appearance.stackedLayoutAppearance.normal.iconColor = UIColor.secondaryLabel
-                appearance.stackedLayoutAppearance.normal.titleTextAttributes = [
-                    .foregroundColor: UIColor.secondaryLabel
-                ]
-                
-                UITabBar.appearance().standardAppearance = appearance
-                if #available(iOS 15.0, *) {
-                    UITabBar.appearance().scrollEdgeAppearance = appearance
-                }
-            }
-            
-            // Mini Player above tab bar
-            if audioPlayer.currentSong != nil {
-                VStack(spacing: 10) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.15))
-                        .frame(width: 36, height: 4)
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                if audioPlayer.currentSong != nil {
                     MiniPlayerView()
                         .environmentObject(audioPlayer)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 12)
+                }
+
+                HStack(alignment: .center, spacing: 18) {
+                    CustomTabBarView(items: tabItems, selection: $selectedTab)
+                    SearchFloatingButton {
+                        showingSearch = true
+                    }
                 }
                 .padding(.horizontal, 24)
-                .padding(.bottom, 72) // Lift mini player slightly above tab bar
             }
+            .padding(.bottom, 32)
         }
         .overlay(alignment: .top) {
             if connectivity.isOffline {
                 OfflineBanner()
                     .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .sheet(isPresented: $showingCreateSheet) {
+            CreatePlaylistSheet()
+                .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(isPresented: $showingSearch) {
+            SearchView()
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        showingSearch = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(Color.black.opacity(0.7))
+                            .clipShape(Circle())
+                            .padding(.top, 20)
+                            .padding(.trailing, 20)
+                    }
+                }
+        }
+        .onChange(of: selectedTab) { newValue in
+            if newValue == 2 {
+                showingCreateSheet = true
+                selectedTab = 1
             }
         }
         .onChange(of: connectivity.isOffline) { offline in

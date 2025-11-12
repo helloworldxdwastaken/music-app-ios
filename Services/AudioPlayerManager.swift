@@ -12,6 +12,8 @@ import UIKit
 extension Notification.Name {
     static let previewPlaybackDidStart = Notification.Name("previewPlaybackDidStart")
     static let audioPlaybackDidStart = Notification.Name("audioPlaybackDidStart")
+    static let playlistsDidChange = Notification.Name("playlistsDidChange")
+    static let libraryDidChange = Notification.Name("libraryDidChange")
 }
 
 class AudioPlayerManager: NSObject, ObservableObject {
@@ -22,12 +24,17 @@ class AudioPlayerManager: NSObject, ObservableObject {
     @Published var volume: Double = 0.7
     @Published var queue: [Song] = []
     @Published var currentIndex: Int = 0
+    @Published var currentPlaylist: Playlist?
     var apiService: APIService?
     var offlineManager: OfflineManager?
     
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var currentPlayerItem: AVPlayerItem?
+    private var recentlyPlayed: [Song] = []
+    private let maxRecentlyPlayed = 25
+    private var libraryCache: [Song] = []
+    private var isLoadingRecommendations = false
     
     override init() {
         super.init()
@@ -103,13 +110,15 @@ class AudioPlayerManager: NSObject, ObservableObject {
         currentSong = song
         queue = [song]
         currentIndex = 0
+        currentPlaylist = nil
         playCurrentSong()
     }
     
-    func playQueue(songs: [Song], startAt: Int = 0) {
+    func playQueue(songs: [Song], startAt: Int = 0, playlist: Playlist? = nil) {
         queue = songs
         currentIndex = startAt
         currentSong = songs[startAt]
+        currentPlaylist = playlist
         playCurrentSong()
     }
     
@@ -124,6 +133,8 @@ class AudioPlayerManager: NSObject, ObservableObject {
             print("Cannot get stream URL for song")
             return
         }
+
+        recordPlay(song)
 
         NotificationCenter.default.post(name: .audioPlaybackDidStart, object: nil)
         
@@ -224,13 +235,20 @@ class AudioPlayerManager: NSObject, ObservableObject {
     }
     
     func nextTrack() {
-        guard currentIndex < queue.count - 1 else {
-            // End of queue
+        guard !queue.isEmpty else {
+            pause()
+            currentSong = nil
+            currentIndex = 0
             return
         }
-        currentIndex += 1
-        currentSong = queue[currentIndex]
-        playCurrentSong()
+
+        if currentIndex < queue.count - 1 {
+            currentIndex += 1
+            currentSong = queue[currentIndex]
+            playCurrentSong()
+        } else {
+            handleQueueCompletion()
+        }
     }
     
     func previousTrack() {
@@ -247,6 +265,138 @@ class AudioPlayerManager: NSObject, ObservableObject {
         }
     }
     
+    func removeCurrentSongFromQueue() {
+        guard !queue.isEmpty else { return }
+        queue.remove(at: currentIndex)
+
+        if queue.isEmpty {
+            pause()
+            currentSong = nil
+            currentIndex = 0
+            duration = 0
+            currentTime = 0
+            currentPlaylist = nil
+            return
+        }
+
+        if currentIndex >= queue.count {
+            currentIndex = max(queue.count - 1, 0)
+        }
+
+        currentSong = queue[currentIndex]
+        playCurrentSong()
+    }
+    
+    private func handleQueueCompletion() {
+        guard !isLoadingRecommendations else { return }
+        isLoadingRecommendations = true
+
+        loadRecommendations { [weak self] recommendations in
+            guard let self = self else { return }
+            self.isLoadingRecommendations = false
+
+            guard !recommendations.isEmpty else {
+                self.pause()
+                return
+            }
+
+            guard self.currentIndex >= self.queue.count - 1 else {
+                return
+            }
+
+            let nextIndex = self.queue.count
+            self.queue.append(contentsOf: recommendations)
+            self.currentIndex = nextIndex
+            self.currentPlaylist = nil
+            self.currentSong = self.queue[self.currentIndex]
+            self.playCurrentSong()
+        }
+    }
+
+    private func loadRecommendations(count: Int = 10, completion: @escaping ([Song]) -> Void) {
+        let queueSnapshot = queue
+        let recentSnapshot = recentlyPlayed
+        let offlineSongs = offlineManager?.allDownloadedSongs ?? []
+
+        let processLibrary: ([Song]) -> Void = { [weak self] library in
+            guard let self = self else { return }
+            DispatchQueue.global(qos: .userInitiated).async { [queueSnapshot, recentSnapshot] in
+                let recommendations = self.computeRecommendations(from: library, count: count, queueSnapshot: queueSnapshot, recentSnapshot: recentSnapshot)
+                DispatchQueue.main.async { completion(recommendations) }
+            }
+        }
+
+        if !libraryCache.isEmpty {
+            processLibrary(libraryCache)
+            return
+        }
+
+        guard let apiService = apiService else {
+            processLibrary(offlineSongs)
+            return
+        }
+
+        apiService.fetchSongs(limit: nil, offset: 0) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let songs):
+                self.libraryCache = songs
+                processLibrary(songs)
+            case .failure:
+                processLibrary(offlineSongs)
+            }
+        }
+    }
+
+    private func computeRecommendations(from library: [Song], count: Int, queueSnapshot: [Song], recentSnapshot: [Song]) -> [Song] {
+        guard !library.isEmpty else { return [] }
+
+        let queueIds = Set(queueSnapshot.map { $0.id })
+        let queueArtists = Set(queueSnapshot.map { $0.artist.lowercased() })
+        let queueAlbums = Set(queueSnapshot.compactMap { $0.album?.lowercased() })
+        let recentArtists = Set(recentSnapshot.map { $0.artist.lowercased() })
+        let allArtists = queueArtists.union(recentArtists)
+
+        var scored: [(Song, Double)] = []
+
+        for track in library {
+            if queueIds.contains(track.id) { continue }
+
+            var score: Double = 0
+            let artistLower = track.artist.lowercased()
+
+            if allArtists.contains(artistLower) {
+                score += 10
+            }
+
+            if queueArtists.contains(artistLower) {
+                score += 15
+            }
+
+            if let albumLower = track.album?.lowercased(), queueAlbums.contains(albumLower) {
+                score += 8
+            }
+
+            score += Double.random(in: 0..<5)
+            scored.append((track, score))
+        }
+
+        guard !scored.isEmpty else { return [] }
+
+        scored.sort { $0.1 > $1.1 }
+        return scored.prefix(count).map { $0.0 }
+    }
+
+    private func recordPlay(_ song: Song) {
+        if let existingIndex = recentlyPlayed.firstIndex(where: { $0.id == song.id }) {
+            recentlyPlayed.remove(at: existingIndex)
+        }
+        recentlyPlayed.insert(song, at: 0)
+        if recentlyPlayed.count > maxRecentlyPlayed {
+            recentlyPlayed.removeLast(recentlyPlayed.count - maxRecentlyPlayed)
+        }
+    }
+
     @objc private func playerDidFinishPlaying() {
         // Auto-play next track
         nextTrack()

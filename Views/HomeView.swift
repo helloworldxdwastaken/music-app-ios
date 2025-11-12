@@ -73,6 +73,11 @@ struct HomeView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .applyDarkNavBar()
+            .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
+                if apiService.isAuthenticated {
+                    loadSongs()
+                }
+            }
             .onAppear {
                 if songs.isEmpty && apiService.isAuthenticated {
                     loadSongs()

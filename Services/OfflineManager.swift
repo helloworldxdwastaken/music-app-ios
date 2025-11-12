@@ -237,6 +237,39 @@ final class OfflineManager: ObservableObject, @unchecked Sendable {
             self.downloadProgress[playlist.id] = nil
             self.activeDownloads.remove(playlist.id)
             self.persistCache()
+            NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
+        }
+    }
+    
+    func detach(song: Song, from playlist: Playlist) {
+        DispatchQueue.main.async {
+            if var entry = self.playlists[playlist.id] {
+                entry.songIds.removeAll { $0 == song.id }
+                if entry.songIds.isEmpty {
+                    self.playlists[playlist.id] = nil
+                } else {
+                    self.playlists[playlist.id] = entry
+                }
+            }
+            if var track = self.tracks[song.id] {
+                track.playlistIds.remove(playlist.id)
+                self.tracks[song.id] = track
+            }
+            self.persistCache()
+            NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
+        }
+    }
+    
+    func updatePlaylistMetadata(_ updatedPlaylist: Playlist, artworkURL: String? = nil) {
+        DispatchQueue.main.async {
+            guard let entry = self.playlists[updatedPlaylist.id] else { return }
+            var snapshot = OfflinePlaylist(playlist: updatedPlaylist, songIds: entry.songIds, downloadedAt: entry.downloadedAt, artworkURL: entry.artworkURL)
+            if let artworkURL = artworkURL {
+                snapshot.artworkURL = artworkURL
+            }
+            self.playlists[updatedPlaylist.id] = snapshot
+            self.persistCache()
+            NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
         }
     }
     
@@ -257,6 +290,8 @@ final class OfflineManager: ObservableObject, @unchecked Sendable {
             self.deleteFile(named: track.localFileName)
             self.deleteArtwork(from: track.artworkURL)
             self.persistCache()
+            NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
+            NotificationCenter.default.post(name: .libraryDidChange, object: nil)
         }
     }
     

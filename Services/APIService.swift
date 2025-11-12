@@ -382,48 +382,68 @@ class APIService: ObservableObject {
         }.resume()
     }
     
-    func addSong(_ songId: Int, to playlistId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)/tracks") else {
+    func createPlaylist(name: String, description: String?, completion: @escaping (Result<Playlist, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/api/playlists") else {
             completion(.failure(APIError.invalidURL))
             return
         }
-        
-        let payload: [String: Any] = ["musicId": songId]
-        let body = try? JSONSerialization.data(withJSONObject: payload)
+
+        var payload: [String: Any] = ["name": name]
+        if let description, !description.isEmpty {
+            payload["description"] = description
+        }
+
+        guard JSONSerialization.isValidJSONObject(payload),
+              let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            completion(.failure(APIError.invalidRequest))
+            return
+        }
+
         let request = createRequest(url: url, method: "POST", body: body)
-        
+
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
                     completion(.failure(error))
                     return
                 }
-                
+
                 guard let httpResponse = response as? HTTPURLResponse else {
                     completion(.failure(APIError.invalidResponse))
                     return
                 }
-                
+
                 if httpResponse.statusCode == 401 {
                     self.handleUnauthorized()
                     completion(.failure(APIError.unauthorized))
                     return
                 }
-                
+
                 guard let data = data else {
                     completion(.failure(APIError.noData))
                     return
                 }
-                
-                if let response = self.parseBasicResponse(from: data), response.success {
-                    completion(.success(()))
+
+                do {
+                    let response = try JSONDecoder().decode(CreatePlaylistResponse.self, from: data)
+                    if response.success {
+                        completion(.success(response.playlist))
+                        return
+                    }
+                } catch {
+                    // Fall through to parse as basic response for error message
+                }
+
+                if let basic = self.parseBasicResponse(from: data) {
+                    let message = basic.error ?? basic.message ?? "Failed to create playlist"
+                    completion(.failure(NSError(domain: "API", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: message])))
                 } else {
                     completion(.failure(APIError.decodingFailed))
                 }
             }
         }.resume()
     }
-    
+
     func updatePlaylist(playlistId: Int, name: String, description: String?, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)") else {
             completion(.failure(APIError.invalidURL))
@@ -436,6 +456,38 @@ class APIService: ObservableObject {
         performBasicOperation(request: request, defaultMessage: "Playlist updated", completion: completion)
     }
     
+    func addTrackToPlaylist(playlistId: Int, musicId: Int, position: Int? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)/tracks") else {
+            completion(.failure(APIError.invalidURL))
+            return
+        }
+        var payload: [String: Any] = ["musicId": musicId]
+        if let position = position {
+            payload["position"] = position
+        }
+        let body = try? JSONSerialization.data(withJSONObject: payload)
+        let request = createRequest(url: url, method: "POST", body: body)
+        performBasicOperation(request: request, defaultMessage: "Track added to playlist", completion: completion)
+    }
+
+    func removeTrackFromPlaylist(playlistId: Int, musicId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)/tracks/\(musicId)") else {
+            completion(.failure(APIError.invalidURL))
+            return
+        }
+        let request = createRequest(url: url, method: "DELETE")
+        performBasicOperation(request: request, defaultMessage: "Track removed from playlist", completion: completion)
+    }
+
+    func deleteTrack(musicId: Int, deleteFile: Bool, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/api/library/track/\(musicId)?deleteFile=\(deleteFile)") else {
+            completion(.failure(APIError.invalidURL))
+            return
+        }
+        let request = createRequest(url: url, method: "DELETE")
+        performBasicOperation(request: request, defaultMessage: "Track deleted", completion: completion)
+    }
+
     func deletePlaylist(playlistId: Int, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/api/playlists/\(playlistId)") else {
             completion(.failure(APIError.invalidURL))

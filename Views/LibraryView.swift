@@ -58,12 +58,38 @@ struct LibraryView: View {
             }
             .navigationTitle("Library")
             .applyDarkNavBar()
-            .onAppear {
-                if playlists.isEmpty && apiService.isAuthenticated {
+            .onReceive(NotificationCenter.default.publisher(for: .playlistsDidChange)) { _ in
+                if connectivity.isOffline {
+                    syncOfflineLibrary()
+                } else {
                     loadPlaylists()
                 }
-                if librarySongs.isEmpty && apiService.isAuthenticated {
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
+                if connectivity.isOffline {
+                    syncOfflineLibrary()
+                } else if apiService.isAuthenticated {
                     loadSongs()
+                }
+            }
+            .onChange(of: connectivity.isOffline) { isOffline in
+                if isOffline {
+                    syncOfflineLibrary()
+                } else if apiService.isAuthenticated {
+                    loadPlaylists()
+                    loadSongs()
+                }
+            }
+            .onAppear {
+                if connectivity.isOffline {
+                    syncOfflineLibrary()
+                } else {
+                    if playlists.isEmpty && apiService.isAuthenticated {
+                        loadPlaylists()
+                    }
+                    if librarySongs.isEmpty && apiService.isAuthenticated {
+                        loadSongs()
+                    }
                 }
             }
         }
@@ -107,6 +133,11 @@ struct LibraryView: View {
                 }
             }
         }
+    }
+    
+    private func syncOfflineLibrary() {
+        playlists = offlineManager.downloadedPlaylists.map { $0.displayPlaylist }
+        librarySongs = offlineManager.allDownloadedSongs
     }
     
     private var gridColumns: [GridItem] {

@@ -154,7 +154,7 @@ struct PlaylistDetailView: View {
                 } else {
                     LazyVStack(spacing: 10) {
                         ForEach(songs) { song in
-                            SongRowView(song: song, playlist: playlist)
+                            SongRowView(song: song, playlist: playlist, onRemoved: handleSongRemoval)
                                 .onTapGesture {
                                     playSong(song)
                                 }
@@ -304,7 +304,7 @@ struct PlaylistDetailView: View {
         // Find the index of the selected song in the playlist
         if let index = songs.firstIndex(where: { $0.id == song.id }) {
             // Play the entire playlist starting from the selected song
-            audioPlayer.playQueue(songs: songs, startAt: index)
+            audioPlayer.playQueue(songs: songs, startAt: index, playlist: playlist)
         } else {
             // Fallback if song not found in playlist
             audioPlayer.play(song: song)
@@ -314,7 +314,7 @@ struct PlaylistDetailView: View {
     
     private func playAll() {
         if !songs.isEmpty {
-            audioPlayer.playQueue(songs: songs)
+            audioPlayer.playQueue(songs: songs, playlist: playlist)
             showingPlayer = true
         }
     }
@@ -331,15 +331,21 @@ struct PlaylistDetailView: View {
     
     private func saveDetails() {
         let trimmedName = playlistTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDescription = playlistDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             editStatus = "Playlist name cannot be empty."
             return
         }
-        apiService.updatePlaylist(playlistId: playlist.id, name: trimmedName, description: playlistDescription.isEmpty ? nil : playlistDescription) { result in
+        apiService.updatePlaylist(playlistId: playlist.id, name: trimmedName, description: trimmedDescription.isEmpty ? nil : trimmedDescription) { result in
             switch result {
             case .success:
+                playlistTitle = trimmedName
+                playlistDescription = trimmedDescription
                 editStatus = "Playlist updated."
                 showingEditDetails = false
+                let updatedPlaylist = Playlist(id: playlist.id, name: trimmedName, description: trimmedDescription.isEmpty ? nil : trimmedDescription, coverURL: playlist.coverURL, trackCount: playlist.trackCount, createdAt: playlist.createdAt, userId: playlist.userId)
+                offlineManager.updatePlaylistMetadata(updatedPlaylist)
+                NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
             case .failure(let error):
                 editStatus = error.localizedDescription
             }
@@ -355,6 +361,7 @@ struct PlaylistDetailView: View {
             case .success:
                 offlineManager.removePlaylist(playlist)
                 songs.removeAll()
+                NotificationCenter.default.post(name: .playlistsDidChange, object: nil)
                 editStatus = "Playlist deleted."
                 isDeleting = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -365,6 +372,14 @@ struct PlaylistDetailView: View {
                 isDeleting = false
             }
         }
+    }
+
+    private func handleSongRemoval(_ removedSong: Song) {
+        withAnimation {
+            songs.removeAll { $0.id == removedSong.id }
+        }
+        tempSongs.removeAll { $0.id == removedSong.id }
+        editStatus = "Song removed from playlist."
     }
 
     private func saveReorder() {
