@@ -35,7 +35,14 @@ jobs:
         run: |
           xcodegen generate
       
-      - name: Build with iOS 26 SDK
+      - name: Detect available iOS SDK
+        run: |
+          set -euo pipefail
+          IOS_SDK=$(xcodebuild -showsdks | awk '/iphoneos/{print $2}' | tail -1)
+          echo "Detected iOS SDK: $IOS_SDK"
+          echo "IOS_SDK=$IOS_SDK" >> $GITHUB_ENV
+      
+      - name: Build with detected SDK
         env:
           DERIVED_DATA: build/DerivedData
         run: |
@@ -43,7 +50,7 @@ jobs:
             -project MusicStream.xcodeproj \
             -scheme MusicStream \
             -configuration Release \
-            -sdk iphoneos26.0 \
+            -sdk "$IOS_SDK" \
             -destination "generic/platform=iOS" \
             -derivedDataPath "$DERIVED_DATA" \
             CODE_SIGN_IDENTITY="" \
